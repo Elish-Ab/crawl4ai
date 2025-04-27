@@ -90,21 +90,34 @@ async def scrape_openroom(name: str):
                 """)
 
                 img_elements = await case_page.query_selector_all("div.mt-2.flex.flex-col.gap-y-2 img")
-                cloud_imgs = []
 
-                for i, img in enumerate(img_elements):
+                # --- NEW LOGIC: Fetch all images in parallel ---
+                async def download_and_upload(page, img_url):
                     try:
-                        img_url = await img.get_attribute("src")
-                        if img_url:
-                            response = await case_page.request.get(img_url)
-                            if response.ok:
-                                img_bytes = await response.body()
-                                uploaded = await upload_to_cloudinary(img_bytes)
-                                if uploaded:
-                                    cloud_imgs.append(uploaded)
+                        response = await page.request.get(img_url)
+                        if response.ok:
+                            img_bytes = await response.body()
+                            uploaded = await upload_to_cloudinary(img_bytes)
+                            return uploaded
                     except Exception as e:
-                        print(f"[Image Error] Image {i+1}: {e}")
+                        print(f"[Image Error] {img_url}: {e}")
+                    return None
 
+                # Collect all image URLs
+                img_urls = []
+                for img in img_elements:
+                    img_url = await img.get_attribute("src")
+                    if img_url:
+                        img_urls.append(img_url)
+
+                # Download and upload images in parallel
+                tasks = [download_and_upload(case_page, url) for url in img_urls]
+                cloud_imgs = await asyncio.gather(*tasks)
+
+                # Filter out any failed uploads
+                cloud_imgs = [img for img in cloud_imgs if img]
+
+                # --- Result aggregation ---
                 results.append({
                     "provider": "OPENROOM",
                     "links": [link],
@@ -116,9 +129,11 @@ async def scrape_openroom(name: str):
                     "amountOwed": metadata.get("amountOwed"),
                     "courtOrderImages": cloud_imgs
                 })
+
                 await case_page.close()
             except Exception as e:
                 print(f"[OpenRoom Error] Failed scraping {link}: {e}")
+
         await browser.close()
     return results
 
@@ -205,7 +220,7 @@ async def scrape_quebec(name: str):
                 "date": summary["date"],
                 "keywords": summary["keywords"],
                 "caseUrl": summary["caseUrl"],
-                "fullTextSnippet": trim_text_snippet(full_text)
+                "fullTextSnippet": clean_text_preserve_meaning(full_text)
 
             })
         await browser.close()
@@ -295,7 +310,7 @@ async def scrape_alberta(name: str):
                     "date": summary["date"],
                     "keywords": summary["keywords"],
                     "caseUrl": summary["caseUrl"],
-                    "fullTextSnippet": trim_text_snippet(full_text)
+                    "fullTextSnippet": clean_text_preserve_meaning(full_text)
                 })
 
             # Pagination
@@ -405,7 +420,7 @@ async def scrape_british_columbia(name: str):
                     "date": summary["date"],
                     "keywords": summary["keywords"],
                     "caseUrl": summary["caseUrl"],
-                    "fullTextSnippet": trim_text_snippet(full_text)
+                    "fullTextSnippet": clean_text_preserve_meaning(full_text)
                 })
 
             # Pagination
@@ -426,10 +441,45 @@ async def scrape_british_columbia(name: str):
 
 
 
-def trim_text_snippet(text: str, max_length: int = 5000) -> str:
-    if text and len(text) > max_length:
-        return text[:max_length].rstrip() + "… [TRIMMED]"
-    return text
+import re
+
+def clean_and_extract_decision(text: str, max_length: int = 5000) -> str:
+    if not text:
+        return ""
+    # Remove newlines and tabs, compress multiple spaces
+    text = re.sub(r'[\n\r\t]+', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()[:max_length]
+
+
+def clean_text_preserve_meaning(text: str, max_length: int = 7000) -> str:
+    if not text:
+        return ""
+
+    # Clean up the text first
+    text = re.sub(r'[\n\r\t]+', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+
+    # Try to extract from "POUR CES MOTIFS" (French) or "Conclusion" (English)
+    fr_match = re.search(r"(POUR CES MOTIFS.*?)(Présence|Me\b|Dated|$)", text, re.IGNORECASE)
+    en_match = re.search(r"(Conclusion.*?)(Dated|Signed|Respectfully submitted|$)", text, re.IGNORECASE)
+
+    snippet = None
+
+    if fr_match:
+        # Also try to get a few paragraphs before "POUR CES MOTIFS"
+        start_idx = max(0, fr_match.start() - 1000)
+        snippet = text[start_idx:fr_match.end()]
+    elif en_match:
+        start_idx = max(0, en_match.start() - 1000)
+        snippet = text[start_idx:en_match.end()]
+    else:
+        # fallback: last few [xx] paragraphs
+        paragraphs = re.findall(r'\[\d+\][^\[]+', text)
+        snippet = ' '.join(paragraphs[-6:]) if paragraphs else text[-max_length:]
+
+    return snippet.strip()[:max_length] + ("…" if len(snippet) > max_length else "")
+
 
 # ----------------------------------------
 # FastAPI Endpoints
