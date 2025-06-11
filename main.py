@@ -5,6 +5,8 @@ import httpx
 from playwright.async_api import async_playwright
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
+import re
+
 app = FastAPI()
 
 # Enable CORS for frontend access
@@ -438,10 +440,6 @@ async def scrape_british_columbia(name: str):
         await browser.close()
 
     return results
-
-
-
-import re
 
 def clean_and_extract_decision(text: str, max_length: int = 4000) -> str:
     if not text:
